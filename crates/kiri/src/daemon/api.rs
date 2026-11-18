@@ -474,6 +474,18 @@ pub(super) fn reference_matches(pattern: &str, name: &str) -> bool {
     }
 }
 
+/// Docker resolves an unqualified `ancestor` to `:latest`; unlike the
+/// `reference` filter, it must not match every tag of the repository (#442).
+fn ancestor_matches(pattern: &str, image: &str, image_id: &str) -> bool {
+    let tagged = |s: &str| match s.rsplit_once(':') {
+        Some((_, tag)) if !tag.contains('/') => s.to_owned(),
+        _ => format!("{s}:latest"),
+    };
+    reference_matches(&tagged(pattern), &tagged(image))
+        || image == pattern
+        || image_id.trim_start_matches("sha256:").starts_with(pattern.trim_start_matches("sha256:"))
+}
+
 fn images(req: &Request, engine: &Engine) -> Result<Value, Error> {
     let f = filters(req, &["reference", "dangling", "label"])?;
     let mut list = engine.store.images()?;
@@ -1954,7 +1966,7 @@ fn list(req: &Request, engine: &Engine) -> Result<Value, Error> {
             && f.labels(&labels)
             && f.any("status", |v| v == state_word(c))
             && f.any("exited", |v| c.status == Status::Exited && v.parse() == Ok(c.exit_code))
-            && f.any("ancestor", |v| reference_matches(v, &c.spec.image) || c.spec.image == v || c.spec.image_id.trim_start_matches("sha256:").starts_with(v.trim_start_matches("sha256:")))
+            && f.any("ancestor", |v| ancestor_matches(v, &c.spec.image, &c.spec.image_id))
             && f.any("network", |v| net.is_some_and(|n| n.name == v || n.id.starts_with(v)))
             && f.any("volume", |v| c.spec.volumes.iter().chain(&c.spec.anon_volumes).any(|n| n == v) || c.spec.mount_info.iter().any(|m| m["Destination"] == v || m["Source"] == v))
             && f.any("health", |v| v == health.get(&c.id).map_or("none", |h| h.status.as_str()));
@@ -2923,6 +2935,20 @@ mod tests {
         assert_eq!(crate::client::kiri_version(&v), Some(env!("CARGO_PKG_VERSION")));
         // An engine from before KiriVersion: its Version was Kiri's.
         assert_eq!(crate::client::kiri_version(&json!({"Version": "0.2.0"})), Some("0.2.0"));
+    }
+
+    /// `ancestor=alpine` means `alpine:latest`, not every alpine tag (#442).
+    #[test]
+    fn ancestor_filter_uses_the_latest_tag() {
+        let m = |p: &str, i: &str| super::ancestor_matches(p, i, "sha256:other");
+        assert!(m("alpine", "alpine"));
+        assert!(m("alpine", "alpine:latest"));
+        assert!(!m("alpine", "alpine:3.21"));
+        assert!(m("alpine:3.21", "alpine:3.21"));
+        assert!(!m("alpine:3.21", "alpine"));
+        assert!(m("localhost:5000/x", "localhost:5000/x"));
+        assert!(super::ancestor_matches("sha256:abc", "alpine", "sha256:abcdef"));
+        assert!(super::ancestor_matches("abcdef", "alpine", "sha256:abcdef"));
     }
 
     /// Docker's merge of a create's Entrypoint and Cmd with the image's.
