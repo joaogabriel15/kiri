@@ -1412,6 +1412,8 @@ fn console_size(v: &Value) -> Option<(u16, u16)> {
 /// Cmd takes the image's (Testcontainers sends `"Cmd": []`), and a missing
 /// Entrypoint the image's (`[]` clears it).
 fn command(entry: Option<Vec<String>>, cmd: Option<Vec<String>>, image_entry: &[String], image_cmd: &[String]) -> (Vec<String>, Vec<String>) {
+    // `--entrypoint=` sends `[""]`; Docker treats that as clearing it (#445).
+    let entry = entry.map(|e| e.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>());
     let cmd = cmd.unwrap_or_default();
     match entry {
         Some(e) if !e.is_empty() => (e, cmd),
@@ -2940,6 +2942,9 @@ mod tests {
         assert_eq!(command(Some(s(&["sh"])), Some(s(&["-c", "x"])), &ie, &ic), (s(&["sh"]), s(&["-c", "x"])));
         // "Entrypoint": [] clears the image's and keeps its Cmd.
         assert_eq!(command(Some(vec![]), None, &ie, &ic), (vec![], ic.clone()));
+        // `--entrypoint=` arrives as [""] and must clear it too (#445).
+        assert_eq!(command(Some(s(&[""])), None, &ie, &ic), (vec![], ic.clone()));
+        assert_eq!(command(Some(s(&[""])), Some(s(&["/bin/sh", "-c", "echo ok"])), &ie, &ic), (vec![], s(&["/bin/sh", "-c", "echo ok"])));
     }
 
     #[test]
