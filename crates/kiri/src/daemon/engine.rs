@@ -842,6 +842,17 @@ fn from_ns(n: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_nanos(n)
 }
 
+/// `/etc/hosts` uses the first match, so `--add-host` and links come before
+/// Kiri's own names: an override of `host.docker.internal` must win (#425).
+fn container_hosts(extra_hosts: &[String], links: Vec<String>) -> Vec<String> {
+    let mut hosts = Vec::with_capacity(extra_hosts.len() + links.len() + 2);
+    hosts.extend(extra_hosts.iter().cloned());
+    hosts.extend(links);
+    hosts.push(format!("{}\thost.docker.internal host.kiri.internal", super::ports::HOST_ADDR));
+    hosts.push(format!("{}\tgateway.docker.internal", super::ports::HOST_ADDR));
+    hosts
+}
+
 impl Engine {
     /// Boots the guest, loads saved containers and restarts the ones whose
     /// restart policy says so.
@@ -2500,12 +2511,7 @@ impl Engine {
         }
         flags |= spec.security_flags();
         // Every container can reach the Mac, as with Docker Desktop and OrbStack.
-        let mut hosts = vec![
-            format!("{}\thost.docker.internal host.kiri.internal", super::ports::HOST_ADDR),
-            format!("{}\tgateway.docker.internal", super::ports::HOST_ADDR),
-        ];
-        hosts.extend(spec.extra_hosts.iter().cloned());
-        hosts.extend(links);
+        let hosts = container_hosts(&spec.extra_hosts, links);
         let mut opts = net_opts(&spec, joined.as_deref(), &domainname);
         opts.extend(net6_opts);
         let net_args = kiri_proto::Net { bridge: &bridge, ip, prefix, gateway, extra_hosts: &hosts, dns_names: &dns_names, opts: &opts };
@@ -5225,5 +5231,27 @@ mod save_speed_tests {
         assert!(saves < unsynced * 8 + Duration::from_millis(500), "{saves:?} for saves against {unsynced:?} unsynced");
         drop(engine);
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod hosts_tests {
+    use super::*;
+
+    #[test]
+    fn add_host_overrides_kiris_names() {
+        let extra = vec!["10.9.8.7\thost.docker.internal".to_owned()];
+        let hosts = container_hosts(&extra, vec!["10.0.0.2\tdb".to_owned()]);
+        assert_eq!(hosts[0], extra[0]);
+        assert_eq!(hosts[1], "10.0.0.2\tdb");
+        assert!(hosts[2].ends_with("\thost.docker.internal host.kiri.internal"));
+        assert!(hosts[3].ends_with("\tgateway.docker.internal"));
+    }
+
+    #[test]
+    fn kiris_names_stay_first_without_overrides() {
+        let hosts = container_hosts(&[], vec![]);
+        assert!(hosts[0].ends_with("\thost.docker.internal host.kiri.internal"));
+        assert!(hosts[1].ends_with("\tgateway.docker.internal"));
     }
 }
